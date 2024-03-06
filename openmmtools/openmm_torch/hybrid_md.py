@@ -102,14 +102,18 @@ def get_xyz_from_mol(mol):
     return xyz
 
 
-def parareal_error_novel(N_init, N_final, x_prev, x_cur, v_prev, v_cur):
+# def parareal_error_novel(N_init, N_final, x_prev, x_cur, v_prev, v_cur):
+#     return sum([np.linalg.norm(x_prev[n] - x_cur[n]) for n in range(N_init, N_final)]) \
+#         / sum([np.linalg.norm(x_prev[n]) for n in range(N_init, N_final)])
+        
+# def parareal_error_withvel(N_init, N_final, x_prev, x_cur, v_prev, v_cur):
+#     return sum([np.sqrt(np.linalg.norm(x_prev[n] - x_cur[n]) ** 2 + \
+#         np.linalg.norm(v_prev[n] - v_cur[n]) ** 2) for n in range(N_init, N_final)]) \
+#         / sum([np.sqrt(np.linalg.norm(x_prev[n]) ** 2 + np.linalg.norm(v_prev[n]) ** 2) for n in range(N_init, N_final)])        
+
+def parareal_error(N_init, N_final, x_prev, x_cur):
     return sum([np.linalg.norm(x_prev[n] - x_cur[n]) for n in range(N_init, N_final)]) \
         / sum([np.linalg.norm(x_prev[n]) for n in range(N_init, N_final)])
-        
-def parareal_error_withvel(N_init, N_final, x_prev, x_cur, v_prev, v_cur):
-    return sum([np.sqrt(np.linalg.norm(x_prev[n] - x_cur[n]) ** 2 + \
-        np.linalg.norm(v_prev[n] - v_cur[n]) ** 2) for n in range(N_init, N_final)]) \
-        / sum([np.sqrt(np.linalg.norm(x_prev[n]) ** 2 + np.linalg.norm(v_prev[n]) ** 2) for n in range(N_init, N_final)])        
 
 MLPotential.registerImplFactory("mace", MACEPotentialImplFactory())
 MLPotential.registerImplFactory("ani2x", ANIPotentialImplFactory())
@@ -517,15 +521,13 @@ class MACESystemBase(ABC):
         fine_time_step,
         seed = 123 ,
         equilibrate_steps = 5000,
-        delta_conv = 1e-5,
+        delta_conv_x = 1e-5,
+        delta_conv_v = 2e-3,
         delta_expl = 5,
         NumParaReal = 125,
-        constrain_velocity = False
     ):
-        # set parareal error
-        parareal_error = parareal_error_withvel if constrain_velocity else parareal_error_novel
         
-        logging.info("=== running parareal simulation ===")
+        print("=== running parareal simulation ===")
 
         # gather some info from self
         coarse_time_step = self.timestep
@@ -620,7 +622,7 @@ class MACESystemBase(ABC):
         
         # TODO: wrap this below into a function, this is so messy right now but easier for me to debug
         for kk in range(NumParaReal):
-            print(f"Resolving T =: {kk * NumCoarseSteps} to {(kk +1) * NumCoarseSteps} ...")
+            print(f"Resolving T =: {kk * NumCoarseSteps} to {(kk + 1) * NumCoarseSteps} ...")
             
             # init 
             sol_x_init = [np.array([np.zeros(3) for _ in range(init_pos.shape[0])])] * N
@@ -628,19 +630,21 @@ class MACESystemBase(ABC):
             _G_L = np.random.normal(0, 1, (fine_steps_total, npos, 3))
             G_L = [mat2vecvec(_G_L[k, :, :]) for k in range(fine_steps_total)]
             
+            # # TODO: clean up this loop
+            # if kk > 1:                
+            #     print(" ==== check norm === ")
+            #     sol_x_init[0] = sol_x_current[-1]
+            #     sol_v_init[0] = sol_v_current[-1]
+            #     current_positions, current_velocity = getPosVel(coarse_simulation)
+            # else:
+            #     current_positions, current_velocity = getPosVel(coarse_simulation)
+            #     sol_x_init[0] = current_positions
+            #     sol_v_init[0] = current_velocity
+            
             # the last position and velocity
-            # TODO: clean up this loop
-            if kk > 1:                
-                print(" ==== check norm === ")
-                sol_x_init[0] = sol_x_current[-1]
-                sol_v_init[0] = sol_v_current[-1]
-                current_positions, current_velocity = getPosVel(coarse_simulation)
-                print(np.linalg.norm(sol_x_current[-1] - current_positions))
-                print(np.linalg.norm(sol_v_current[-1] - current_velocity))
-            else:
-                current_positions, current_velocity = getPosVel(coarse_simulation)
-                sol_x_init[0] = current_positions
-                sol_v_init[0] = current_velocity
+            current_positions, current_velocity = getPosVel(coarse_simulation)
+            sol_x_init[0] = current_positions
+            sol_v_init[0] = current_velocity
 
 
             # coarse propogator initialization
@@ -661,7 +665,8 @@ class MACESystemBase(ABC):
 
             # set cost
             Cost = 0
-            delta = delta_expl * 0.99
+            delta_x = delta_expl * 0.99
+            delta_v = delta_expl * 0.99
             N_expl = 0
 
             
@@ -683,7 +688,7 @@ class MACESystemBase(ABC):
 
             # adaptive PARAEAL iterations
             while N_init < N:
-                while delta > delta_conv and delta < delta_expl:
+                while (delta_x > delta_conv_x or delta_v > delta_conv_v) and delta_x < delta_expl and delta_v < delta_expl:
                     # define prev as current
                     sol_x_prev = copy.deepcopy(sol_x_current)
                     sol_v_prev = copy.deepcopy(sol_v_current)
@@ -749,8 +754,10 @@ class MACESystemBase(ABC):
 
                         # compute relative error from parareal solutions
                         # TODO: we compute the error with respect to position only... does it affect the dynamics?
-                        delta = parareal_error(N_init, n + 1, sol_x_prev, sol_x_current, sol_v_prev, sol_v_current)
-                        if delta > delta_expl:
+                        delta_x = parareal_error(N_init, n + 1, sol_x_prev, sol_x_current)
+                        delta_v = parareal_error(N_init, n + 1, sol_v_prev, sol_v_current)
+                        
+                        if delta_x > delta_expl or delta_v > delta_expl:
                             N_expl = n + 1
                             break
                     state = coarse_simulation.context.getState(getEnergy=True)
@@ -760,9 +767,9 @@ class MACESystemBase(ABC):
                     coarse_simulation.context.setVelocities(sol_v_current[N_final - 1])
                         
                     print("N_init, N_final: ", N_init, N_final)
-                    print("delta: ", delta)
-                    print("delta_conv: ", delta_conv)
-                    delta_array.append(delta)
+                    print("delta_x: ", delta_x)
+                    print("delta_v: ", delta_v)
+                    delta_array.append((delta_x, delta_v))
                 # end while
                 print("end while")
                 
@@ -771,7 +778,7 @@ class MACESystemBase(ABC):
                 
                 # if explode, we set N_final to smaller interval and consider that smaller interval first
                 # this is the adaptive part
-                if delta > delta_expl:
+                if delta_x > delta_expl or delta_v > delta_expl:
                     N_final = N_expl - 1
                 else:
                     # this loop is only useful if delta > delta_expl previously, and N_final < N
@@ -791,7 +798,8 @@ class MACESystemBase(ABC):
                     coarse_simulation.context.setVelocities(sol_v_current[N-1])
                     N_final = N
                 state = coarse_simulation.context.getState(getPositions=True, getVelocities=True, getEnergy=True)
-                delta = (delta_conv + delta_expl) / 2
+                delta_x = (delta_conv_x + delta_expl) / 2
+                delta_v = (delta_conv_v + delta_expl) / 2
                 print("Final temperature: ", (2*state.getKineticEnergy()/(total_dof*MOLAR_GAS_CONSTANT_R)).value_in_unit(kelvin))
             # end while
             # this should be done inside the forloop, but just to make sure it works fine
