@@ -251,6 +251,8 @@ class MACESystemBase(ABC):
             integrator = RPMDIntegrator(
                 8, self.temperature, self.friction_coeff, self.timestep
             )
+        elif integrator_name == "BAOAB"
+            integrator = openmmtools.integrators.LangevinIntegrator(self.temperature, self.friction_coeff, self.timestep)
         else:
             raise ValueError(
                 f"Unrecognized integrator name {integrator_name}, must be one of ['langevin', 'nose-hoover', 'rpmd', 'verlet']"
