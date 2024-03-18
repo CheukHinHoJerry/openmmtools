@@ -102,18 +102,14 @@ def get_xyz_from_mol(mol):
     return xyz
 
 
-# def parareal_error_novel(N_init, N_final, x_prev, x_cur, v_prev, v_cur):
-#     return sum([np.linalg.norm(x_prev[n] - x_cur[n]) for n in range(N_init, N_final)]) \
-#         / sum([np.linalg.norm(x_prev[n]) for n in range(N_init, N_final)])
-        
-# def parareal_error_withvel(N_init, N_final, x_prev, x_cur, v_prev, v_cur):
-#     return sum([np.sqrt(np.linalg.norm(x_prev[n] - x_cur[n]) ** 2 + \
-#         np.linalg.norm(v_prev[n] - v_cur[n]) ** 2) for n in range(N_init, N_final)]) \
-#         / sum([np.sqrt(np.linalg.norm(x_prev[n]) ** 2 + np.linalg.norm(v_prev[n]) ** 2) for n in range(N_init, N_final)])        
-
-def parareal_error(N_init, N_final, x_prev, x_cur):
+def parareal_error_rel(N_init, N_final, x_prev, x_cur):
     return sum([np.linalg.norm(x_prev[n] - x_cur[n]) for n in range(N_init, N_final)]) \
         / sum([np.linalg.norm(x_prev[n]) for n in range(N_init, N_final)])
+
+def parareal_error_abs(N_init, N_final, x_prev, x_cur):
+    normalization = len(x_prev[1]) * 3 * (N_final - N_init)
+    return sum([np.linalg.norm(x_prev[n] - x_cur[n]) for n in range(N_init, N_final)]) / normalization
+
 
 MLPotential.registerImplFactory("mace", MACEPotentialImplFactory())
 MLPotential.registerImplFactory("ani2x", ANIPotentialImplFactory())
@@ -623,23 +619,13 @@ class MACESystemBase(ABC):
         # TODO: wrap this below into a function, this is so messy right now but easier for me to debug
         for kk in range(NumParaReal):
             print(f"Resolving T =: {kk * NumCoarseSteps} to {(kk + 1) * NumCoarseSteps} ...")
+            print(f"Parareal iteraction : {kk}")
             
             # init 
             sol_x_init = [np.array([np.zeros(3) for _ in range(init_pos.shape[0])])] * N
             sol_v_init = [np.array([np.zeros(3) for _ in range(init_vel.shape[0])])] * N
             _G_L = np.random.normal(0, 1, (fine_steps_total, npos, 3))
             G_L = [mat2vecvec(_G_L[k, :, :]) for k in range(fine_steps_total)]
-            
-            # # TODO: clean up this loop
-            # if kk > 1:                
-            #     print(" ==== check norm === ")
-            #     sol_x_init[0] = sol_x_current[-1]
-            #     sol_v_init[0] = sol_v_current[-1]
-            #     current_positions, current_velocity = getPosVel(coarse_simulation)
-            # else:
-            #     current_positions, current_velocity = getPosVel(coarse_simulation)
-            #     sol_x_init[0] = current_positions
-            #     sol_v_init[0] = current_velocity
             
             # the last position and velocity
             current_positions, current_velocity = getPosVel(coarse_simulation)
@@ -754,8 +740,8 @@ class MACESystemBase(ABC):
 
                         # compute relative error from parareal solutions
                         # TODO: we compute the error with respect to position only... does it affect the dynamics?
-                        delta_x = parareal_error(N_init, n + 1, sol_x_prev, sol_x_current)
-                        delta_v = parareal_error(N_init, n + 1, sol_v_prev, sol_v_current)
+                        delta_x = parareal_error_abs(N_init, n + 1, sol_x_prev, sol_x_current)
+                        delta_v = parareal_error_rel(N_init, n + 1, sol_v_prev, sol_v_current)
                         
                         if delta_x > delta_expl or delta_v > delta_expl:
                             N_expl = n + 1
@@ -813,7 +799,16 @@ class MACESystemBase(ABC):
             all_sol_v_array = all_sol_v_array + sol_v_current[1:]
             all_temp_array = all_temp_array + temperature_array[1:]
             all_delta_array = all_delta_array + delta_array
-        # save to numpy array for visualization
+            
+            
+            # save to numpy array for visualization
+            if kk % 1000 == 0:
+                np.save(os.path.join(self.output_dir, "sol_x_current.npy"), np.array(all_sol_x_array, dtype=object), allow_pickle=True)
+                np.save(os.path.join(self.output_dir, "sol_v_current.npy"), np.array(all_sol_v_array, dtype=object), allow_pickle=True)
+                np.savetxt(os.path.join(self.output_dir, "temperature_array.txt"), all_temp_array)
+                np.save(os.path.join(self.output_dir, "delta_array.npy"), all_delta_array)
+                np.savetxt(os.path.join(self.output_dir, "tmp_eqm_save.txt"), tmp_eqm_save)
+        
         np.save(os.path.join(self.output_dir, "sol_x_current.npy"), np.array(all_sol_x_array, dtype=object), allow_pickle=True)
         np.save(os.path.join(self.output_dir, "sol_v_current.npy"), np.array(all_sol_v_array, dtype=object), allow_pickle=True)
         np.savetxt(os.path.join(self.output_dir, "temperature_array.txt"), all_temp_array)
@@ -1579,10 +1574,16 @@ class PararealSystem(MACESystemBase):
         else:
             raise NotImplementedError
 
+
+        # === setting up coarse and fine propogators ===
+        if coarse_mace:
+            print("+++++++++ running with coarse mace propogator - the emperical ff is not used +++++++++")
+
         # TODO: allow here to construct other potentials, maybe add an extra argument etc.
         # the GO can always be done by mace, it doesn't matter.
+        # self.potential = "mace", almost always
         fine_potential = MLPotential(self.potential, model_path=model_path)
-        coarse_potential = app.ForceField(coarse_potential_path)
+        coarse_potential = MLPotential(self.potential, model_path=coarse_potential_path) if coarse_mace else app.ForceField(coarse_potential_path)
         
         self.fine_system = fine_potential.createSystem(topology,
                                                 nonbondedMethod=nonbounded_method,
@@ -1590,11 +1591,7 @@ class PararealSystem(MACESystemBase):
                                                 nl=self.nl, 
                                                 max_n_pairs=self.max_n_pairs, 
                                                 )
-        
-        if coarse_mace:
-            print("running with coarse mace propogator - the emperical ff is not used")
-
-        self.coarse_system = self.coarse_system = fine_potential.createSystem(topology,
+        self.coarse_system = coarse_potential.createSystem(topology,
                                                 nonbondedMethod=nonbounded_method,
                                                 dtype=self.dtype,
                                                 nl=self.nl, 
