@@ -43,7 +43,7 @@ from openmm.app import (
     PME,
     HBonds,
 )
-from ase.optimize import LBFGS
+from ase.optimize import LBFGS, FIRE
 from openmm.app.metadynamics import Metadynamics, BiasVariable
 from openmm.app.topology import Topology
 from openmm.app.element import Element
@@ -65,6 +65,7 @@ from openff.toolkit.topology import Molecule
 from openff.toolkit import ForceField
 
 from openmmtools import alchemy
+import openmmtools 
 
 from openmmml.models.macepotential import MACEPotentialImplFactory
 from openmmml.models.anipotential import ANIPotentialImplFactory
@@ -251,7 +252,7 @@ class MACESystemBase(ABC):
             integrator = RPMDIntegrator(
                 8, self.temperature, self.friction_coeff, self.timestep
             )
-        elif integrator_name == "BAOAB"
+        elif integrator_name == "BAOAB":
             integrator = openmmtools.integrators.LangevinIntegrator(self.temperature, self.friction_coeff, self.timestep)
         else:
             raise ValueError(
@@ -1315,7 +1316,8 @@ class PureSystem(MACESystemBase):
             atoms.set_calculator(calc)
             # minimise the system with ase
             logger.info("Minimising with ASE...")
-            opt = LBFGS(atoms)
+            # opt = LBFGS(atoms)
+            opt = FIRE(atoms)
             opt.run(fmax=0.2)
             os.remove(tmp_path)
 
