@@ -547,6 +547,9 @@ class MACESystemBase(ABC):
         fine_integrators = [CustomLangevinIntegrator_mt(self.temperature, self.friction_coeff, timestep = fine_time_step, NumFineSteps = NumFineSteps) for _ in range(NumCoarseSteps)]
         integrator = CustomLangevinIntegrator(self.temperature, self.friction_coeff, coarse_time_step)
         
+        # fine integrator for equilibriation
+        eql_integrator = CustomLangevinIntegrator(self.temperature, self.friction_coeff, fine_time_step)
+        
         logger.debug(f"Running mixed MD for {steps} steps")
         
         coarse_simulation = Simulation(
@@ -555,11 +558,19 @@ class MACESystemBase(ABC):
             integrator,
             platformProperties={"Precision": self.openmm_precision},
         )
+        
+                
+        eql_simulation = Simulation(
+            self.modeller.topology,
+            self.fine_system,
+            eql_integrator,
+            platformProperties={"Precision": self.openmm_precision},
+        )
 
         ##
         
         # === geoemtry optimization ===
-        coarse_simulation.context.setPositions(self.modeller.getPositions())
+        eql_simulation.context.setPositions(self.modeller.getPositions())
         logging.info("skipping geometry optimization")
         # TODO: fix this
         # simulation.minimizeEnergy()
@@ -576,9 +587,9 @@ class MACESystemBase(ABC):
         # === assmble context ===
         fine_contexts = AssembleContexts(self.fine_system, fine_integrators)
         
-        coarse_simulation.context.setVelocitiesToTemperature(self.temperature, seed)
+        eql_simulation.context.setVelocitiesToTemperature(self.temperature, seed)
 
-        init_pos, init_vel = getPosVel(coarse_simulation)
+        init_pos, init_vel = getPosVel(eql_simulation)
         # N = NumCoarseSteps + 1
         # sol_x_init and sol_x_current is always not updated!!! 
         # It should be set directly from previous simumlations
@@ -598,27 +609,31 @@ class MACESystemBase(ABC):
         #TODO: optimize this
         tmp_eqm_save = []
         for n in tqdm(range(equilibrate_steps)):
-            integrator.setPerDofVariableByName("g1", G_L_init[n])
-            coarse_simulation.step(1)
-            state = coarse_simulation.context.getState(getEnergy=True)
+            eql_integrator.setPerDofVariableByName("g1", G_L_init[n])
+            eql_simulation.step(1)
+            state = eql_simulation.context.getState(getEnergy=True)
             if n % 100 == 0:
                 print(f"{n} equilibration temperature : ", (2*state.getKineticEnergy()/(total_dof*MOLAR_GAS_CONSTANT_R)).value_in_unit(kelvin))
             tmp_eqm_save.append((2*state.getKineticEnergy()/(total_dof*MOLAR_GAS_CONSTANT_R)).value_in_unit(kelvin))
 
 
         print("=== equilibration done ===")
-        state = coarse_simulation.context.getState(getEnergy=True)
+        state = eql_simulation.context.getState(getEnergy=True)
         ("Final temperature: ", (2*state.getKineticEnergy() / (total_dof*MOLAR_GAS_CONSTANT_R)).value_in_unit(kelvin))
 
 
         # === what is written belows would be parareal ===
-        current_positions, current_velocity = getPosVel(coarse_simulation)
+        current_positions, current_velocity = getPosVel(eql_simulation)
         # saving initial position
         all_sol_x_array = [] + [current_positions,]
         all_sol_v_array = [] + [current_velocity,]
         all_temp_array = []
         all_delta_array = []
-        
+
+        # set for coarse system
+        coarse_simulation.context.setPositions(current_positions)
+        coarse_simulation.context.setVelocities(current_velocity)
+
         # TODO: wrap this below into a function, this is so messy right now but easier for me to debug
         for kk in range(NumParaReal):
             print(f"Resolving T =: {kk * NumCoarseSteps} to {(kk + 1) * NumCoarseSteps} ...")
@@ -1601,3 +1616,4 @@ class PararealSystem(MACESystemBase):
                                                 nl=self.nl, 
                                                 max_n_pairs=self.max_n_pairs, 
                                                 ) if coarse_mace else coarse_potential.createSystem(topology, nonbondedMethod=nonbounded_method,)
+        
