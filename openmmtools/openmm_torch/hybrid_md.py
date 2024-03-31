@@ -104,12 +104,12 @@ def get_xyz_from_mol(mol):
 
 
 def parareal_error_rel(N_init, N_final, x_prev, x_cur):
-    return sum([np.linalg.norm(x_prev[n] - x_cur[n]) for n in range(N_init, N_final)]) \
-        / sum([np.linalg.norm(x_prev[n]) for n in range(N_init, N_final)])
+    return sum([np.linalg.norm(x_prev[j] - x_cur[j]) for j in range(N_init, N_final)]) \
+        / sum([np.linalg.norm(x_prev[j]) for j in range(N_init, N_final)])
 
 def parareal_error_abs(N_init, N_final, x_prev, x_cur):
     normalization = len(x_prev[1]) * 3 * (N_final - N_init)
-    return sum([np.linalg.norm(x_prev[n] - x_cur[n]) for n in range(N_init, N_final)]) / normalization
+    return sum([np.linalg.norm(x_prev[j] - x_cur[j]) for j in range(N_init, N_final)]) / normalization
 
 
 MLPotential.registerImplFactory("mace", MACEPotentialImplFactory())
@@ -522,11 +522,12 @@ class MACESystemBase(ABC):
         equilibrate_steps = 5000,
         delta_conv_x = 1e-5,
         delta_conv_v = 2e-3,
-        delta_expl = 5,
+        delta_expl_x = 5,
+        delta_expl_v = 5,
         NumParaReal = 125,
     ):
         
-        print("=== running parareal simulation ===")
+        print("=== running NEW parareal simulation ===")
 
         # gather some info from self
         coarse_time_step = self.timestep
@@ -669,8 +670,8 @@ class MACESystemBase(ABC):
 
             # set cost
             Cost = 0
-            delta_x = delta_expl * 0.99
-            delta_v = delta_expl * 0.99
+            delta_x = delta_expl_x * 0.99
+            delta_v = delta_expl_v * 0.99
             N_expl = 0
 
             
@@ -679,7 +680,6 @@ class MACESystemBase(ABC):
             N = NumCoarseSteps + 1
             N_final = copy.deepcopy(N)            
             
-            end_flag = False
             max_nsteps = 200
 
             # set gaussian variable for different integrators here
@@ -692,8 +692,9 @@ class MACESystemBase(ABC):
 
             # adaptive PARAEAL iterations
             while N_init < N:
-                while (delta_x > delta_conv_x or delta_v > delta_conv_v) and delta_x < delta_expl and delta_v < delta_expl:
-                    # define prev as current
+                while (delta_x > delta_conv_x or delta_v > delta_conv_v) and delta_x < delta_expl_x and delta_v < delta_expl_v:
+                    # define prev as current, only N_init to N_final should be used 
+                    # but the whole thing is copied for simplicity
                     sol_x_prev = copy.deepcopy(sol_x_current)
                     sol_v_prev = copy.deepcopy(sol_v_current)
 
@@ -702,19 +703,25 @@ class MACESystemBase(ABC):
                     # use fine_position, fine_velocity = getPosVel(fine_contexts[n])
                     # to get F_{deltat}(x^{prev}_{n})
 
-                    for (idx, _context) in enumerate(fine_contexts):
-                        _context.setPositions(sol_x_prev[idx])
-                        _context.setVelocities(sol_v_prev[idx])
+                    # for (idx, _context) in enumerate(fine_contexts):
+                    #     _context.setPositions(sol_x_prev[idx])
+                    #     _context.setVelocities(sol_v_prev[idx])
+                    for idx in range(N_init, N_final - 1):
+                        fine_contexts[idx].setPositions(sol_x_prev[idx])
+                        fine_contexts[idx].setVelocities(sol_v_prev[idx])
                     
                     print("Finish setting context positions")
                     
                     mytime = time.time()
                     
                     # === serial === TODO: this should be in parallel
-                    for (n, _integrator) in enumerate(fine_integrators):
-                        _integrator.setGlobalVariableByName("fine_iter", 0)
-                        _integrator.step(NumFineSteps)
-                        
+                    # for (idx, _integrator) in enumerate(fine_integrators):
+                    #     _integrator.setGlobalVariableByName("fine_iter", 0)
+                    #     _integrator.step(NumFineSteps)
+                    for idx in range(N_init, N_final - 1):
+                        fine_integrators[idx].setGlobalVariableByName("fine_iter", 0)
+                        fine_integrators[idx].step(NumFineSteps)
+                    
                     print("Time for fine steps: ", time.time() - mytime)
 
 
@@ -757,18 +764,22 @@ class MACESystemBase(ABC):
                         sol_v_current[n+1] = array2np(C_Dt_v_current + jump_v[n])
 
                         # compute relative error from parareal solutions
-                        # TODO: we compute the error with respect to position only... does it affect the dynamics?
-                        delta_x = parareal_error_abs(N_init, n + 1, sol_x_prev, sol_x_current)
-                        delta_v = parareal_error_rel(N_init, n + 1, sol_v_prev, sol_v_current)
-                        
-                        if delta_x > delta_expl or delta_v > delta_expl:
+                        # n ranges from N_init to N_final - 2
+                        # so n + 2 is at most N_final, and then we sum in that range
+                        delta_x = parareal_error_abs(N_init, n + 2, sol_x_prev, sol_x_current)
+                        delta_v = parareal_error_rel(N_init, n + 2, sol_v_prev, sol_v_current)
+
+                        if delta_x > delta_expl_x or delta_v > delta_expl_v:
+                            print("exploded")
                             N_expl = n + 1
                             break
+                    # the time step before explode
+                    coarse_simulation.context.setPositions(sol_x_current[n])
+                    coarse_simulation.context.setVelocities(sol_v_current[n])
+                    # temperature for the step before explode
                     state = coarse_simulation.context.getState(getEnergy=True)
-                    temperature_array[N_final - 1] = (2*state.getKineticEnergy()/(total_dof*MOLAR_GAS_CONSTANT_R)).value_in_unit(kelvin)
+                    temperature_array[n] = (2*state.getKineticEnergy()/(total_dof*MOLAR_GAS_CONSTANT_R)).value_in_unit(kelvin)
                     # setting position for the last step
-                    coarse_simulation.context.setPositions(sol_x_current[N_final - 1])
-                    coarse_simulation.context.setVelocities(sol_v_current[N_final - 1])
                         
                     print("N_init, N_final: ", N_init, N_final)
                     print("delta_x: ", delta_x)
@@ -777,13 +788,14 @@ class MACESystemBase(ABC):
                 # end while
                 print("end while")
                 
-                if end_flag:
-                    break
-                
                 # if explode, we set N_final to smaller interval and consider that smaller interval first
                 # this is the adaptive part
-                if delta_x > delta_expl or delta_v > delta_expl:
+                if delta_x > delta_expl_x or delta_v > delta_expl_v:
                     N_final = N_expl - 1
+                    coarse_simulation.context.setPositions(sol_x_current[N_final - 1])
+                    coarse_simulation.context.setVelocities(sol_v_current[N_final - 1])
+                    state = coarse_simulation.context.getState(getPositions=True, getVelocities=True, getEnergy=True)               
+                    print("Exploded, Temperature current (stable) slab: ", (2*state.getKineticEnergy()/(total_dof*MOLAR_GAS_CONSTANT_R)).value_in_unit(kelvin))
                 else:
                     # this loop is only useful if delta > delta_expl previously, and N_final < N
                     # then after the previous slab has converged we set N_init = N_final and proceed
@@ -795,20 +807,32 @@ class MACESystemBase(ABC):
                         coarse_simulation.context.setVelocities(sol_v_current[n])
                         integrator.setPerDofVariableByName("g1", G_L[n * NumFineSteps])
                         coarse_simulation.step(1)
-                        sol_x_current[n+1], sol_v_current[n+1] = getPosVel(fine_contexts[n])
+                        sol_x_current[n+1], sol_v_current[n+1] = getPosVel(coarse_simulation)
 
                     # setting the position for the final step separataly
-                    coarse_simulation.context.setPositions(sol_x_current[N-1])
-                    coarse_simulation.context.setVelocities(sol_v_current[N-1])
+                    if N_final == N:
+                        coarse_simulation.context.setPositions(sol_x_current[N - 1])
+                        coarse_simulation.context.setVelocities(sol_v_current[N - 1])
+                        state = coarse_simulation.context.getState(getEnergy=True)               
+                        print("Done current parareal interval, temperature: ", (2*state.getKineticEnergy()/(total_dof*MOLAR_GAS_CONSTANT_R)).value_in_unit(kelvin))
+                    else:
+                        coarse_simulation.context.setPositions(sol_x_current[N_final])
+                        coarse_simulation.context.setVelocities(sol_v_current[N_final])
+                        state = coarse_simulation.context.getState(getEnergy=True)
+                        print("Not exploded, stable slab temperature: ", (2*state.getKineticEnergy()/(total_dof*MOLAR_GAS_CONSTANT_R)).value_in_unit(kelvin))
+                        coarse_simulation.context.setPositions(sol_x_current[N - 1])
+                        coarse_simulation.context.setVelocities(sol_v_current[N - 1])
+                        state = coarse_simulation.context.getState(getEnergy=True)
+                        print("Reinit temperature: ", (2*state.getKineticEnergy()/(total_dof*MOLAR_GAS_CONSTANT_R)).value_in_unit(kelvin))
                     N_final = N
-                state = coarse_simulation.context.getState(getPositions=True, getVelocities=True, getEnergy=True)
-                delta_x = (delta_conv_x + delta_expl) / 2
-                delta_v = (delta_conv_v + delta_expl) / 2
-                print("Final temperature: ", (2*state.getKineticEnergy()/(total_dof*MOLAR_GAS_CONSTANT_R)).value_in_unit(kelvin))
+                
+                delta_x = (delta_conv_x + delta_expl_x) / 2
+                delta_v = (delta_conv_v + delta_expl_v) / 2
+
             # end while
             # this should be done inside the forloop, but just to make sure it works fine
-            coarse_simulation.context.setPositions(sol_x_current[N-1])
-            coarse_simulation.context.setVelocities(sol_v_current[N-1])
+            #coarse_simulation.context.setPositions(sol_x_current[N-1])
+            #coarse_simulation.context.setVelocities(sol_v_current[N-1])
             
             # merging arrays together for saving result
             # TODO: make this flush to a npy? otherwise there are memory problem?
