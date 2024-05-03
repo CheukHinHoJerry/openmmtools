@@ -90,7 +90,7 @@ from .sd_integrators import CustomLangevinIntegrator
 from .integrator_mt import CustomLangevinIntegrator_mt
 from .parareal_utils import *
 import threading, copy
-
+import numpy as np
 
 def get_xyz_from_mol(mol):
     xyz = np.zeros((mol.GetNumAtoms(), 3))
@@ -110,6 +110,15 @@ def parareal_error_rel(N_init, N_final, x_prev, x_cur):
 def parareal_error_abs(N_init, N_final, x_prev, x_cur):
     normalization = len(x_prev[1]) * 3 * (N_final - N_init)
     return sum([np.linalg.norm(x_prev[j] - x_cur[j]) for j in range(N_init, N_final)]) / normalization
+
+def parareal_error_weighted_rel(N_init, N_final, x_prev, x_cur, atom_mass):
+    return sum([np.linalg.norm((x_prev[j] - x_cur[j]) * atom_mass) for j in range(N_init, N_final)]) \
+        / sum([np.linalg.norm(x_prev[j] * atom_mass) for j in range(N_init, N_final)])
+
+
+def parareal_error_weighted_abs(N_init, N_final, x_prev, x_cur, atom_mass):
+    normalization = float(len(x_prev[1]) * 3 * (N_final - N_init))
+    return sum([np.linalg.norm((x_prev[j] - x_cur[j]) * atom_mass) for j in range(N_init, N_final)]) / normalization
 
 
 MLPotential.registerImplFactory("mace", MACEPotentialImplFactory())
@@ -394,6 +403,14 @@ class MACESystemBase(ABC):
                 _temp = (2*state.getKineticEnergy()/(total_dof*MOLAR_GAS_CONSTANT_R)).value_in_unit(kelvin)
                 tmp_array.append(_temp)
             np.savetxt(os.path.join(self.output_dir, "temperature_array.txt"), tmp_array)
+            # write cell
+            state4box = simulation.context.getState()
+            _box_tup = state4box.getPeriodicBoxVectors()
+            _box = np.zeros((3, 3))
+            for i in range(3):
+                for j in range(3):
+                    _box[i, j] = _box_tup[i][j]._value
+            np.savetxt(os.path.join(self.output_dir, "box.txt"), _box)
 
             
 
@@ -542,6 +559,10 @@ class MACESystemBase(ABC):
         N = NumCoarseSteps + 1
         N_final = copy.deepcopy(N)
         
+        # get mass
+        _atom_mass = np.array([self.coarse_system.getParticleMass(i)._value for i in range(self.coarse_system.getNumParticles())])
+        atom_mass = np.repeat(_atom_mass[:, np.newaxis], 3, axis=1)
+
         ##
         
         # === create integrator ===
@@ -752,8 +773,8 @@ class MACESystemBase(ABC):
                         # update parareal solution with jump and coarse step
                         coarse_simulation.context.setPositions(sol_x_current[n])
                         coarse_simulation.context.setVelocities(sol_v_current[n])
-                        state = coarse_simulation.context.getState(getEnergy=True)
-                        temperature_array[n] = (2*state.getKineticEnergy()/(total_dof*MOLAR_GAS_CONSTANT_R)).value_in_unit(kelvin)
+                        # state = coarse_simulation.context.getState(getEnergy=True)
+                        # temperature_array[n] = (2*state.getKineticEnergy()/(total_dof*MOLAR_GAS_CONSTANT_R)).value_in_unit(kelvin)
                         
                         integrator.setPerDofVariableByName("g1", G_L[n * NumFineSteps])
                         coarse_simulation.step(1)
@@ -766,19 +787,19 @@ class MACESystemBase(ABC):
                         # compute relative error from parareal solutions
                         # n ranges from N_init to N_final - 2
                         # so n + 2 is at most N_final, and then we sum in that range
-                        delta_x = parareal_error_abs(N_init, n + 2, sol_x_prev, sol_x_current)
-                        delta_v = parareal_error_rel(N_init, n + 2, sol_v_prev, sol_v_current)
+                        delta_x = parareal_error_weighted_abs(N_init, n + 2, sol_x_prev, sol_x_current, atom_mass)
+                        delta_v = parareal_error_weighted_rel(N_init, n + 2, sol_v_prev, sol_v_current, atom_mass)
 
                         if delta_x > delta_expl_x or delta_v > delta_expl_v:
                             print("exploded")
                             N_expl = n + 1
                             break
                     # the time step before explode
-                    coarse_simulation.context.setPositions(sol_x_current[n])
-                    coarse_simulation.context.setVelocities(sol_v_current[n])
-                    # temperature for the step before explode
-                    state = coarse_simulation.context.getState(getEnergy=True)
-                    temperature_array[n] = (2*state.getKineticEnergy()/(total_dof*MOLAR_GAS_CONSTANT_R)).value_in_unit(kelvin)
+                    # coarse_simulation.context.setPositions(sol_x_current[n])
+                    # coarse_simulation.context.setVelocities(sol_v_current[n])
+                    # # temperature for the step before explode
+                    # state = coarse_simulation.context.getState(getEnergy=True)
+                    # temperature_array[n] = (2*state.getKineticEnergy()/(total_dof*MOLAR_GAS_CONSTANT_R)).value_in_unit(kelvin)
                     # setting position for the last step
                         
                     print("N_init, N_final: ", N_init, N_final)
@@ -803,6 +824,15 @@ class MACESystemBase(ABC):
                     # update something here
                     for n in range(N_init, N - 1):
                         print("I should not get into this loop if N_init = 0 and N_final = N")
+                        print(f" ========== {n} ==========")
+                        if n > 0:
+                            print(sol_x_current[n - 1])
+                            print(sol_v_current[n - 1])
+                        print(sol_x_current[n])
+                        print(sol_v_current[n])
+                        print(sol_x_current[n+1])
+                        print(sol_v_current[n+1])
+                        print(f" ========== end {n} ==========")
                         coarse_simulation.context.setPositions(sol_x_current[n])
                         coarse_simulation.context.setVelocities(sol_v_current[n])
                         integrator.setPerDofVariableByName("g1", G_L[n * NumFineSteps])
@@ -811,11 +841,13 @@ class MACESystemBase(ABC):
 
                     # setting the position for the final step separataly
                     if N_final == N:
+                        print(N-1)
                         coarse_simulation.context.setPositions(sol_x_current[N - 1])
                         coarse_simulation.context.setVelocities(sol_v_current[N - 1])
-                        state = coarse_simulation.context.getState(getEnergy=True)               
+                        state = coarse_simulation.context.getState(getEnergy=True)
                         print("Done current parareal interval, temperature: ", (2*state.getKineticEnergy()/(total_dof*MOLAR_GAS_CONSTANT_R)).value_in_unit(kelvin))
                     else:
+                        print(N_final, N)
                         coarse_simulation.context.setPositions(sol_x_current[N_final])
                         coarse_simulation.context.setVelocities(sol_v_current[N_final])
                         state = coarse_simulation.context.getState(getEnergy=True)
@@ -837,6 +869,13 @@ class MACESystemBase(ABC):
             # merging arrays together for saving result
             # TODO: make this flush to a npy? otherwise there are memory problem?
             # the initial position is not saved
+            for idx in range(len(sol_x_current)):
+                coarse_simulation.context.setPositions(sol_x_current[idx])
+                coarse_simulation.context.setVelocities(sol_v_current[idx])
+                # temperature for the step before explode
+                state = coarse_simulation.context.getState(getEnergy=True)
+                temperature_array[idx] = (2*state.getKineticEnergy()/(total_dof*MOLAR_GAS_CONSTANT_R)).value_in_unit(kelvin)
+                    
             all_sol_x_array = all_sol_x_array + sol_x_current[1:]
             all_sol_v_array = all_sol_v_array + sol_v_current[1:]
             all_temp_array = all_temp_array + temperature_array[1:]
@@ -1626,7 +1665,7 @@ class PararealSystem(MACESystemBase):
         # the GO can always be done by mace, it doesn't matter.
         # self.potential = "mace", almost always
         fine_potential = MLPotential(self.potential, model_path=model_path)
-        coarse_potential = MLPotential(self.potential, model_path=coarse_potential_path) if coarse_mace else app.ForceField(coarse_potential_path)
+        coarse_potential = MLPotential(self.potential, model_path=coarse_potential_path) if coarse_mace else app.ForceField(*coarse_potential_path)
         
         self.fine_system = fine_potential.createSystem(topology,
                                                 nonbondedMethod=nonbounded_method,
