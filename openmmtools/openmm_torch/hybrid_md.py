@@ -240,6 +240,7 @@ class MACESystemBase(ABC):
         restart: bool,
         run_metadynamics: bool = False,
         integrator_name: str = "langevin",
+        save_vel: bool = False,
     ):
         """Runs plain MD on the mixed system, writes a pdb trajectory
 
@@ -397,12 +398,19 @@ class MACESystemBase(ABC):
             #simulation.step(steps)
             total_dof = getdof(system=self.system)
             tmp_array = []
-            for _ in range(0, steps):
+            state = simulation.context.getState(getVelocities=True,)
+            save_velocity_array = [state.getVelocities(asNumpy=True), ]
+            for kk in range(0, steps):
                 simulation.step(1)
                 state = simulation.context.getState(getPositions=True, getVelocities=True, getEnergy=True)
                 _temp = (2*state.getKineticEnergy()/(total_dof*MOLAR_GAS_CONSTANT_R)).value_in_unit(kelvin)
                 tmp_array.append(_temp)
+                if kk % interval == 0 and save_vel:
+                    current_velocity = state.getVelocities(asNumpy=True)
+                    save_velocity_array = save_velocity_array + [current_velocity]
             np.savetxt(os.path.join(self.output_dir, "temperature_array.txt"), tmp_array)
+            if save_vel:
+                np.save(os.path.join(self.output_dir, "velocity_array.npy"), save_velocity_array)
             # write cell
             state4box = simulation.context.getState()
             _box_tup = state4box.getPeriodicBoxVectors()
